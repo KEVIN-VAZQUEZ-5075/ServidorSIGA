@@ -18,11 +18,29 @@ let wss = null;
 let currentScanSession = null;
 
 /**
+ * Obtiene el chat_id configurado para el Maestro en Telegram (por defecto "123456789")
+ */
+function getMaestroChatId() {
+    return String(process.env.ID_MAESTRO || process.env.TELEGRAM_MAESTRO_CHAT_ID || '123456789').trim();
+}
+
+/**
+ * Verifica si un chat_id corresponde al maestro.
+ * Si ID_MAESTRO="*" o no se envió chat_id (ej. prueba interna desde simulador), permite el paso.
+ */
+function esChatDeMaestro(chatId) {
+    if (!chatId) return true;
+    const idMaestro = getMaestroChatId();
+    if (!idMaestro || idMaestro === '*') return true;
+    return String(chatId).trim() === idMaestro;
+}
+
+/**
  * Normaliza el nombre del módulo para aceptar alias comunes entre compañeros
  */
 function normalizeModuleName(raw) {
     const val = String(raw || '').toLowerCase().trim();
-    if (['android', 'movil', 'mobile', 'app_android'].includes(val)) return 'android';
+    if (['android', 'movil', 'mobile', 'app_android', 'telegram'].includes(val)) return 'android';
     if (['desktop', 'escritorio', 'pc', 'python', 'app_escritorio'].includes(val)) return 'desktop';
     if (['arduino', 'esp32', 'esp32cam', 'camara', 'hardware'].includes(val)) return 'arduino';
     if (['web', 'react', 'frontend', 'dashboard', 'cliente_web'].includes(val)) return 'web';
@@ -35,6 +53,24 @@ function normalizeModuleName(raw) {
 function sendJson(ws, payload) {
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(payload));
+    }
+}
+
+/**
+ * Helper para mandar texto de regreso a Android y que éste lo envíe a Telegram
+ */
+function responderATelegram(wsAndroid, chatId, texto) {
+    if (!chatId) return;
+    const payload = {
+        tipo: 'respuesta_telegram',
+        chat_id: chatId,
+        mensaje: texto
+    };
+
+    if (wsAndroid && wsAndroid.readyState === WebSocket.OPEN) {
+        sendJson(wsAndroid, payload);
+    } else {
+        broadcastToModules(['android'], payload);
     }
 }
 
@@ -109,7 +145,6 @@ function clearTempSession() {
  * en espera a Arduino (ya sea por WebSocket o por conexión HTTP abierta).
  */
 function startPhotoScanSession(imageBuffer, respondToArduinoCallback) {
-    // Si había una captura previa sin resolver, cerrarla antes
     if (currentScanSession && currentScanSession.finishArduino) {
         currentScanSession.finishArduino(409, {
             tipo: 'resultado_asistencia',
@@ -177,13 +212,14 @@ function startPhotoScanSession(imageBuffer, respondToArduinoCallback) {
 /**
  * Notifica por WebSocket a Escritorio y React cuando se registra un alumno nuevo
  */
-function notifyStudentRegistered(alumno) {
-    // A la App de Escritorio: para que genere el QR con numero_control y lo mande a Telegram
-    broadcastToModules(['desktop'], {
-        tipo: 'nuevo_alumno_qr',
-        msg: 'Nuevo alumno registrado. Generar código QR y enviar a Telegram.',
-        alumno
-    });
+function notifyStudentRegistered(alumno, notifyDesktopImmediately = true) {
+    if (notifyDesktopImmediately) {
+        broadcastToModules(['desktop'], {
+            tipo: 'nuevo_alumno_qr',
+            msg: 'Nuevo alumno registrado. Generar código QR y enviar al servidor.',
+            alumno
+        });
+    }
 
     // Al Cliente Web (React): para actualizar la tabla de alumnos en tiempo real
     broadcastToModules(['web'], {
@@ -196,16 +232,13 @@ function notifyStudentRegistered(alumno) {
  * Notifica el resultado de la verificación de asistencia a Arduino, Escritorio y React Web
  */
 function notifyAttendanceResult(statusCode, payload) {
-    // 1. Si hay una sesión de espera activa de Arduino (WS o HTTP), responderle y limpiar foto temporal
     if (currentScanSession && currentScanSession.finishArduino) {
         currentScanSession.finishArduino(statusCode, payload);
     } else {
-        // Si Arduino está conectado por WS pero no tenía sesión activa, enviarle el resultado de igual forma
         clearTempSession();
         broadcastToModules(['arduino'], payload);
     }
 
-    // 2. Notificar en tiempo real al Cliente Web (React)
     broadcastToModules(['web'], {
         tipo: payload.success ? 'nueva_asistencia' : 'intento_asistencia_fallido',
         ...payload
@@ -214,7 +247,7 @@ function notifyAttendanceResult(statusCode, payload) {
 
 /**
  * Procesa los mensajes entrantes por WebSocket desde cualquiera de los 4 módulos:
- * - Android
+ * - Android (Puente con Bot de Telegram)
  * - App de Escritorio (Desktop)
  * - Arduino (ESP32-CAM)
  * - Cliente Web (React)
@@ -258,6 +291,7 @@ async function handleIncomingWsMessage(ws, rawData, isBinary) {
 
         const tipo = String(message.tipo || message.evento || message.action || '').trim();
         const datos = message.datos || message.data || message;
+        const chatId = datos.chat_id || message.chat_id || null;
 
         switch (tipo) {
             // ----------------------------------------------------------------
@@ -275,7 +309,6 @@ async function handleIncomingWsMessage(ws, rawData, isBinary) {
                     estado_modulos: getConnectedModulesStatus()
                 });
 
-                // Si se acaba de conectar la App de Escritorio y hay una foto pendiente, enviársela
                 if (ws.modulo === 'desktop' && currentScanSession && fs.existsSync(TEMP_PHOTO_PATH)) {
                     const buf = fs.readFileSync(TEMP_PHOTO_PATH);
                     sendJson(ws, {
@@ -286,7 +319,6 @@ async function handleIncomingWsMessage(ws, rawData, isBinary) {
                     });
                 }
 
-                // Avisar al Cliente Web (React) el nuevo estado de los módulos
                 broadcastToModules(['web'], {
                     tipo: 'estado_modulos',
                     modulos: getConnectedModulesStatus()
@@ -295,67 +327,203 @@ async function handleIncomingWsMessage(ws, rawData, isBinary) {
             }
 
             // ----------------------------------------------------------------
-            // 1. FLUJO DE REGISTRO Y GENERACIÓN DE QR:
-            //    Telegram -> Android -> Servidor -> Escritorio (genera QR) -> Servidor -> Android -> Telegram
+            // 1. COMANDOS DE TELEGRAM DEL MAESTRO (Vía Android)
             // ----------------------------------------------------------------
+
+            // 1.1 MAESTRO: Registrar alumno (sin chat_id del alumno aún, o con chat_id_telegram si se envía)
             case 'registrar_alumno': {
                 if (ws.modulo === 'desconocido') ws.modulo = 'android';
 
+                if (!esChatDeMaestro(chatId)) {
+                    return responderATelegram(ws, chatId, '⛔ Solo el maestro puede registrar alumnos.');
+                }
+
                 const alumno = await sigaService.registerOrUpdateStudent(datos);
 
-                // Responder a Android confirmando el alta en la BD
+                // Si viene desde un comando de Telegram con chat_id del maestro, enviar respuesta_telegram
+                if (chatId) {
+                    responderATelegram(
+                        ws,
+                        chatId,
+                        `✅ Alumno ${alumno.nombre_completo} (${alumno.numero_control}) registrado. Pendiente que vincule su chat.`
+                    );
+                }
+
+                // Confirmación técnica adicional por WS
                 sendJson(ws, {
                     tipo: 'alumno_registrado_ack',
                     success: true,
-                    msg: 'Alumno guardado en la base de datos. Solicitando generación de QR a la App de Escritorio...',
+                    msg: 'Alumno guardado en la base de datos.',
                     alumno
                 });
 
-                // Empujar evento en tiempo real a Escritorio (para generar QR) y a React Web
-                notifyStudentRegistered(alumno);
+                // Si el alumno ya trae chat_id_telegram vinculado, pedir QR a Escritorio de inmediato;
+                // siempre notificar en vivo al Cliente Web (React).
+                notifyStudentRegistered(alumno, Boolean(alumno.chat_id_telegram));
                 break;
             }
 
-            case 'solicitar_qr_alumno':
-            case 'miqr': {
-                // Cuando un alumno escribe "/miqr 22070319" en Telegram y Android lo reporta al Servidor
+            // 1.2 MAESTRO: Ver alumnos registrados
+            case 'listar_alumnos': {
                 if (ws.modulo === 'desconocido') ws.modulo = 'android';
 
-                const numero_control = datos.numero_control || datos.no_control || datos.token || message.numero_control;
-                const chat_id_telegram = datos.chat_id_telegram || datos.chat_id || message.chat_id_telegram;
-
-                const alumno = await sigaService.linkStudentTelegramChat(numero_control, chat_id_telegram);
-
-                if (!alumno) {
-                    return sendJson(ws, {
-                        tipo: 'error_qr_alumno',
-                        success: false,
-                        numero_control,
-                        chat_id_telegram,
-                        msg: `El número de control "${numero_control}" no se encuentra registrado en la base de datos.`
-                    });
+                if (!esChatDeMaestro(chatId)) {
+                    return responderATelegram(ws, chatId, '⛔ Comando exclusivo del maestro.');
                 }
 
-                sendJson(ws, {
-                    tipo: 'solicitud_qr_ack',
-                    success: true,
-                    msg: 'Alumno verificado. Solicitando generación de imagen QR a la App de Escritorio...',
-                    alumno
-                });
+                const rows = await sigaService.getAllStudents();
+                if (rows.length === 0) {
+                    return responderATelegram(ws, chatId, '📭 No hay alumnos registrados.');
+                }
 
-                // Pedir a la App de Escritorio que genere el QR para este alumno
+                const lista = rows
+                    .map(
+                        (a) =>
+                            `• ${a.numero_control} - ${a.nombre_completo} (${
+                                a.chat_id_telegram ? '🟢 Vinculado' : '🟡 Pendiente'
+                            })`
+                    )
+                    .join('\n');
+
+                responderATelegram(ws, chatId, `📋 Alumnos registrados:\n\n${lista}`);
+                break;
+            }
+
+            // 1.3 MAESTRO: Reporte general de asistencias
+            case 'reporte_asistencias': {
+                if (ws.modulo === 'desconocido') ws.modulo = 'android';
+
+                if (!esChatDeMaestro(chatId)) {
+                    return responderATelegram(ws, chatId, '⛔ Comando exclusivo del maestro.');
+                }
+
+                const rows = await sigaService.getAttendanceSummaryByStudent();
+                const reporte = rows
+                    .map((r) => `• ${r.nombre_completo} (${r.numero_control}): ${r.total} asistencias`)
+                    .join('\n');
+
+                responderATelegram(ws, chatId, `📊 Reporte de asistencias:\n\n${reporte || 'Sin datos.'}`);
+                break;
+            }
+
+            // ----------------------------------------------------------------
+            // 2. COMANDOS DE TELEGRAM DEL ALUMNO (Vía Android)
+            // ----------------------------------------------------------------
+
+            // 2.1 ALUMNO: Vincular su chat_id con su número de control (/vincular 22070319)
+            case 'vincular_alumno': {
+                if (ws.modulo === 'desconocido') ws.modulo = 'android';
+
+                const numero_control = datos.numero_control || datos.no_control || message.numero_control;
+                const chatParaVincular = chatId || datos.chat_id_telegram;
+
+                const alumnoVinculado = await sigaService.linkStudentTelegramChat(
+                    numero_control,
+                    chatParaVincular
+                );
+
+                if (!alumnoVinculado) {
+                    return responderATelegram(
+                        ws,
+                        chatParaVincular,
+                        '❌ Aún no has sido registrado por el maestro. Contacta a tu profesor.'
+                    );
+                }
+
+                responderATelegram(
+                    ws,
+                    chatParaVincular,
+                    `✅ ¡Listo ${alumnoVinculado.nombre_completo}! Tu chat quedó vinculado. Ya puedes usar /asistencias o /miqr.`
+                );
+
+                // Notificar al Cliente Web (React) que el alumno ya vinculó su Telegram
+                broadcastToModules(['web'], {
+                    tipo: 'alumno_registrado',
+                    alumno: alumnoVinculado
+                });
+                break;
+            }
+
+            // 2.2 ALUMNO: Consultar sus propias asistencias (/asistencias)
+            case 'consultar_asistencias': {
+                if (ws.modulo === 'desconocido') ws.modulo = 'android';
+
+                const chatAlumno = chatId || datos.chat_id_telegram;
+                const alumno = await sigaService.getStudentByTelegramChatId(chatAlumno);
+
+                if (!alumno) {
+                    return responderATelegram(
+                        ws,
+                        chatAlumno,
+                        '⚠️ Primero vincula tu cuenta enviando: /vincular TU_NUMERO_CONTROL'
+                    );
+                }
+
+                const asistencias = await sigaService.getAttendancesByStudentId(alumno.id_alumno);
+                if (asistencias.length === 0) {
+                    return responderATelegram(
+                        ws,
+                        chatAlumno,
+                        `📅 ${alumno.nombre_completo}, aún no tienes asistencias.`
+                    );
+                }
+
+                const lista = asistencias.map((a, i) => `${i + 1}. ${a.fecha_hora}`).join('\n');
+                responderATelegram(
+                    ws,
+                    chatAlumno,
+                    `📅 Tus asistencias (${alumno.nombre_completo}):\n\n${lista}`
+                );
+                break;
+            }
+
+            // 2.3 ALUMNO: Pedir QR a la App de Escritorio (/miqr)
+            case 'solicitar_qr':
+            case 'solicitar_qr_alumno':
+            case 'miqr': {
+                if (ws.modulo === 'desconocido') ws.modulo = 'android';
+
+                const chatAlumno = chatId || datos.chat_id_telegram || message.chat_id_telegram;
+                const numero_control = datos.numero_control || datos.no_control || message.numero_control;
+
+                let alumno = null;
+
+                // Si enviaron numero_control además de chat_id, lo vinculamos y buscamos;
+                // si solo enviaron chat_id (como en case "solicitar_qr"), buscamos por chat_id_telegram.
+                if (numero_control) {
+                    alumno = await sigaService.linkStudentTelegramChat(numero_control, chatAlumno);
+                } else if (chatAlumno) {
+                    alumno = await sigaService.getStudentByTelegramChatId(chatAlumno);
+                }
+
+                if (!alumno) {
+                    return responderATelegram(
+                        ws,
+                        chatAlumno,
+                        '⚠️ Primero vincula tu cuenta enviando: /vincular TU_NUMERO_CONTROL'
+                    );
+                }
+
+                // Reenviar la orden por WebSocket a la App de Escritorio para que genere el QR
                 broadcastToModules(['desktop'], {
                     tipo: 'nuevo_alumno_qr',
                     msg: 'Generar imagen QR con el número de control y enviarla al servidor.',
                     alumno
                 });
+
+                responderATelegram(
+                    ws,
+                    chatAlumno,
+                    '⏳ Generando tu código QR, te llegará en unos segundos...'
+                );
                 break;
             }
 
+            // ----------------------------------------------------------------
+            // 3. RECEPCIÓN DE IMAGEN QR DESDE ESCRITORIO Y ENVÍO A ANDROID
+            // ----------------------------------------------------------------
             case 'qr_generado':
             case 'enviar_qr_generado': {
-                // La App de Escritorio envía la imagen del QR generada al Servidor,
-                // y el Servidor se la reenvía a Android para que Android la mande a Telegram.
                 if (ws.modulo === 'desconocido') ws.modulo = 'desktop';
 
                 const numero_control = String(
@@ -394,10 +562,9 @@ async function handleIncomingWsMessage(ws, rawData, isBinary) {
                     alumno.chat_id_telegram ||
                     null;
 
-                // Marcar en la base de datos que el QR ya fue generado/procesado
                 await sigaService.markQrSent(numero_control, chat_id_telegram);
 
-                // 1. Enviar la imagen del QR y los datos del alumno a ANDROID para que la mande a Telegram
+                // 1. Enviar la imagen del QR y el chat_id a ANDROID para que la mande a Telegram
                 broadcastToModules(['android'], {
                     tipo: 'enviar_qr_telegram',
                     success: true,
@@ -406,11 +573,12 @@ async function handleIncomingWsMessage(ws, rawData, isBinary) {
                     nombre_completo: alumno.nombre_completo,
                     semestre: alumno.semestre,
                     grupo: alumno.grupo,
+                    chat_id: chat_id_telegram,
                     chat_id_telegram,
                     imagen_qr_base64: cleanQrBase64
                 });
 
-                // 2. Confirmar a la App de Escritorio que el servidor recibió el QR y lo transfirió a Android
+                // 2. Confirmar a la App de Escritorio
                 sendJson(ws, {
                     tipo: 'qr_generado_ack',
                     success: true,
@@ -475,7 +643,7 @@ async function handleIncomingWsMessage(ws, rawData, isBinary) {
             }
 
             // ----------------------------------------------------------------
-            // 2. FLUJO DE ASISTENCIA: Arduino -> Servidor -> Desktop -> BD -> Arduino & React
+            // 4. FLUJO DE ASISTENCIA: Arduino -> Servidor -> Desktop -> BD -> Arduino & React
             // ----------------------------------------------------------------
             case 'captura_qr':
             case 'enviar_foto': {
@@ -551,7 +719,7 @@ async function handleIncomingWsMessage(ws, rawData, isBinary) {
             }
 
             // ----------------------------------------------------------------
-            // 3. CONSULTAS PARA EL CLIENTE WEB (REACT) Y OTROS MÓDULOS
+            // 5. CONSULTAS PARA EL CLIENTE WEB (REACT) Y OTROS MÓDULOS
             // ----------------------------------------------------------------
             case 'obtener_alumnos': {
                 const alumnos = await sigaService.getAllStudents(datos.filtros || datos);
@@ -596,6 +764,12 @@ async function handleIncomingWsMessage(ws, rawData, isBinary) {
                     eventos_validos: [
                         'identificar',
                         'registrar_alumno',
+                        'listar_alumnos',
+                        'reporte_asistencias',
+                        'vincular_alumno',
+                        'consultar_asistencias',
+                        'solicitar_qr',
+                        'qr_generado',
                         'obtener_pendientes_qr',
                         'obtener_ultimo_alumno',
                         'qr_enviado',
@@ -627,7 +801,6 @@ function initWebSocketServer(httpServer) {
     wss = new WebSocketServer({ server: httpServer });
 
     wss.on('connection', (ws, req) => {
-        // Permitir identificar el módulo desde la URL: ws://IP:3010/?modulo=desktop
         let initialMod = 'desconocido';
         try {
             const parsedUrl = new URL(req.url, 'http://localhost');
@@ -648,7 +821,6 @@ function initWebSocketServer(httpServer) {
 
         console.log(`[WS] Nueva conexión WebSocket desde ${req.socket.remoteAddress} (módulo: ${ws.modulo})`);
 
-        // Mensaje de bienvenida al conectarse
         sendJson(ws, {
             tipo: 'conexion_exitosa',
             proyecto: 'SIGA - Servidor WebSocket',
@@ -656,7 +828,6 @@ function initWebSocketServer(httpServer) {
             estado_modulos: getConnectedModulesStatus()
         });
 
-        // Actualizar al Cliente Web (React) sobre los módulos conectados
         broadcastToModules(['web'], {
             tipo: 'estado_modulos',
             modulos: getConnectedModulesStatus()
@@ -679,7 +850,6 @@ function initWebSocketServer(httpServer) {
         });
     });
 
-    // Heartbeat cada 30s para detectar desconexiones silenciosas (ej. Arduino sin energía)
     const heartbeatInterval = setInterval(() => {
         if (!wss) return;
         for (const ws of wss.clients) {
@@ -711,10 +881,10 @@ function getTempPhotoInfo() {
 module.exports = {
     initWebSocketServer,
     broadcastToModules,
+    responderATelegram,
     startPhotoScanSession,
     notifyStudentRegistered,
     notifyAttendanceResult,
     getTempPhotoInfo,
     getConnectedModulesStatus
 };
-

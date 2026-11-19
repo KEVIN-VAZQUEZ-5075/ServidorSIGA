@@ -13,8 +13,9 @@ async function registerOrUpdateStudent(data) {
     ).trim();
     const semestre = data.semestre ? String(data.semestre).trim() : null;
     const grupo = data.grupo ? String(data.grupo).trim() : null;
-    const chat_id_telegram = data.chat_id_telegram || data.chat_id
-        ? String(data.chat_id_telegram || data.chat_id).trim()
+    // Nota: chat_id_telegram solo se asigna si viene explícitamente como chat_id_telegram del alumno
+    const chat_id_telegram = data.chat_id_telegram
+        ? String(data.chat_id_telegram).trim()
         : null;
 
     if (!numero_control || !nombre_completo) {
@@ -123,6 +124,76 @@ async function getStudentByControlNumber(numero_control) {
         [String(numero_control).trim()]
     );
     return rows[0] || null;
+}
+
+/**
+ * Busca un alumno por su chat_id_telegram vinculado
+ */
+async function getStudentByTelegramChatId(chat_id_telegram) {
+    const [rows] = await pool.execute(
+        'SELECT * FROM alumnos WHERE chat_id_telegram = ?',
+        [String(chat_id_telegram || '').trim()]
+    );
+    return rows[0] || null;
+}
+
+/**
+ * Vincula el chat_id_telegram de un alumno existente (cuando manda /vincular o /miqr <numero_control>)
+ */
+async function linkStudentTelegramChat(numero_control, chat_id_telegram) {
+    const cleanControl = String(numero_control || '').trim();
+    const cleanChatId = chat_id_telegram ? String(chat_id_telegram).trim() : null;
+
+    const alumno = await getStudentByControlNumber(cleanControl);
+    if (!alumno) {
+        return null;
+    }
+
+    if (cleanChatId) {
+        await pool.execute(
+            'UPDATE alumnos SET chat_id_telegram = ?, qr_enviado = 0 WHERE numero_control = ?',
+            [cleanChatId, cleanControl]
+        );
+    }
+
+    return await getStudentByControlNumber(cleanControl);
+}
+
+/**
+ * Obtiene el resumen de asistencias por alumno (para el comando "reporte_asistencias" del maestro)
+ */
+async function getAttendanceSummaryByStudent() {
+    const [rows] = await pool.execute(`
+        SELECT
+            a.id_alumno,
+            a.numero_control,
+            a.nombre_completo,
+            COUNT(asist.id_asistencia) AS total
+        FROM alumnos a
+        LEFT JOIN asistencias asist ON a.id_alumno = asist.id_alumno
+        GROUP BY a.id_alumno, a.numero_control, a.nombre_completo
+        ORDER BY a.nombre_completo ASC
+    `);
+    return rows;
+}
+
+/**
+ * Obtiene las asistencias de un alumno específico por su id_alumno (para "consultar_asistencias" del alumno)
+ */
+async function getAttendancesByStudentId(id_alumno) {
+    const [rows] = await pool.execute(
+        `SELECT
+            id_asistencia,
+            DATE_FORMAT(fecha, '%Y-%m-%d') AS fecha,
+            hora,
+            DATE_FORMAT(fecha_hora, '%Y-%m-%d %H:%i:%s') AS fecha_hora,
+            estado
+         FROM asistencias
+         WHERE id_alumno = ?
+         ORDER BY fecha_hora DESC`,
+        [id_alumno]
+    );
+    return rows;
 }
 
 /**
@@ -257,7 +328,10 @@ module.exports = {
     markQrSent,
     getAllStudents,
     getStudentByControlNumber,
+    getStudentByTelegramChatId,
+    linkStudentTelegramChat,
+    getAttendanceSummaryByStudent,
+    getAttendancesByStudentId,
     verifyTokenAndCreateAttendance,
     getAttendances
 };
-
