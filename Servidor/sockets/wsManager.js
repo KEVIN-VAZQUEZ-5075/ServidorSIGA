@@ -18,10 +18,10 @@ let wss = null;
 let currentScanSession = null;
 
 /**
- * Obtiene el chat_id configurado para el Maestro en Telegram (por defecto "123456789")
+ * Obtiene el chat_id configurado para el Maestro en Telegram (por defecto "7155239838")
  */
 function getMaestroChatId() {
-    return String(process.env.ID_MAESTRO || process.env.TELEGRAM_MAESTRO_CHAT_ID || '123456789').trim();
+    return String(process.env.ID_MAESTRO || process.env.TELEGRAM_MAESTRO_CHAT_ID || '7155239838').trim();
 }
 
 /**
