@@ -1,8 +1,8 @@
 const { pool } = require('../config/db');
 
 /**
- * Registra un alumno nuevo o actualiza sus datos si el numero_control ya existe.
- * Deja qr_enviado = 0 para que la App de Escritorio genere y envíe el código QR.
+ * Registra un alumno nuevo únicamente con numero_control y nombre_completo
+ * (el id_alumno se asigna automáticamente de uno en uno en la base de datos).
  */
 async function registerOrUpdateStudent(data) {
     const numero_control = String(
@@ -11,9 +11,6 @@ async function registerOrUpdateStudent(data) {
     const nombre_completo = String(
         data.nombre_completo || data.nombre || ''
     ).trim();
-    const semestre = data.semestre ? String(data.semestre).trim() : null;
-    const grupo = data.grupo ? String(data.grupo).trim() : null;
-    // Nota: chat_id_telegram solo se asigna si viene explícitamente como chat_id_telegram del alumno
     const chat_id_telegram = data.chat_id_telegram
         ? String(data.chat_id_telegram).trim()
         : null;
@@ -31,12 +28,10 @@ async function registerOrUpdateStudent(data) {
     }
 
     const query = `
-        INSERT INTO alumnos (numero_control, nombre_completo, semestre, grupo, chat_id_telegram, qr_enviado)
-        VALUES (?, ?, ?, ?, ?, 0)
+        INSERT INTO alumnos (numero_control, nombre_completo, chat_id_telegram, qr_enviado)
+        VALUES (?, ?, ?, 0)
         ON DUPLICATE KEY UPDATE
             nombre_completo = VALUES(nombre_completo),
-            semestre = COALESCE(VALUES(semestre), semestre),
-            grupo = COALESCE(VALUES(grupo), grupo),
             chat_id_telegram = COALESCE(VALUES(chat_id_telegram), chat_id_telegram),
             qr_enviado = 0
     `;
@@ -44,13 +39,11 @@ async function registerOrUpdateStudent(data) {
     await pool.execute(query, [
         numero_control,
         nombre_completo,
-        semestre,
-        grupo,
         chat_id_telegram
     ]);
 
     const [rows] = await pool.execute(
-        'SELECT * FROM alumnos WHERE numero_control = ?',
+        'SELECT id_alumno, numero_control, nombre_completo, chat_id_telegram, qr_enviado, fecha_registro FROM alumnos WHERE numero_control = ?',
         [numero_control]
     );
 
@@ -62,7 +55,7 @@ async function registerOrUpdateStudent(data) {
  */
 async function getPendingQrStudents() {
     const [rows] = await pool.execute(
-        'SELECT * FROM alumnos WHERE qr_enviado = 0 ORDER BY id_alumno ASC'
+        'SELECT id_alumno, numero_control, nombre_completo, chat_id_telegram, qr_enviado, fecha_registro FROM alumnos WHERE qr_enviado = 0 ORDER BY id_alumno ASC'
     );
     return rows;
 }
@@ -72,7 +65,7 @@ async function getPendingQrStudents() {
  */
 async function getLatestStudent() {
     const [rows] = await pool.execute(
-        'SELECT * FROM alumnos ORDER BY id_alumno DESC LIMIT 1'
+        'SELECT id_alumno, numero_control, nombre_completo, chat_id_telegram, qr_enviado, fecha_registro FROM alumnos ORDER BY id_alumno DESC LIMIT 1'
     );
     return rows[0] || null;
 }
@@ -94,24 +87,12 @@ async function markQrSent(numero_control, chat_id_telegram = null) {
 }
 
 /**
- * Lista todos los alumnos con filtros opcionales (grupo, semestre)
+ * Lista todos los alumnos registrados ordenados por id_alumno
  */
-async function getAllStudents(filters = {}) {
-    const { grupo, semestre } = filters;
-    let query = 'SELECT * FROM alumnos WHERE 1=1';
-    const params = [];
-
-    if (grupo) {
-        query += ' AND grupo = ?';
-        params.push(grupo);
-    }
-    if (semestre) {
-        query += ' AND semestre = ?';
-        params.push(semestre);
-    }
-
-    query += ' ORDER BY nombre_completo ASC';
-    const [rows] = await pool.execute(query, params);
+async function getAllStudents() {
+    const [rows] = await pool.execute(
+        'SELECT id_alumno, numero_control, nombre_completo, chat_id_telegram, qr_enviado, fecha_registro FROM alumnos ORDER BY id_alumno ASC'
+    );
     return rows;
 }
 
@@ -120,7 +101,7 @@ async function getAllStudents(filters = {}) {
  */
 async function getStudentByControlNumber(numero_control) {
     const [rows] = await pool.execute(
-        'SELECT * FROM alumnos WHERE numero_control = ?',
+        'SELECT id_alumno, numero_control, nombre_completo, chat_id_telegram, qr_enviado, fecha_registro FROM alumnos WHERE numero_control = ?',
         [String(numero_control).trim()]
     );
     return rows[0] || null;
@@ -131,7 +112,7 @@ async function getStudentByControlNumber(numero_control) {
  */
 async function getStudentByTelegramChatId(chat_id_telegram) {
     const [rows] = await pool.execute(
-        'SELECT * FROM alumnos WHERE chat_id_telegram = ?',
+        'SELECT id_alumno, numero_control, nombre_completo, chat_id_telegram, qr_enviado, fecha_registro FROM alumnos WHERE chat_id_telegram = ?',
         [String(chat_id_telegram || '').trim()]
     );
     return rows[0] || null;
@@ -172,7 +153,7 @@ async function getAttendanceSummaryByStudent() {
         FROM alumnos a
         LEFT JOIN asistencias asist ON a.id_alumno = asist.id_alumno
         GROUP BY a.id_alumno, a.numero_control, a.nombre_completo
-        ORDER BY a.nombre_completo ASC
+        ORDER BY a.id_alumno ASC
     `);
     return rows;
 }
@@ -267,9 +248,7 @@ async function verifyTokenAndCreateAttendance({ token, estado = 'presente', obse
             alumno: {
                 id_alumno: alumno.id_alumno,
                 numero_control: alumno.numero_control,
-                nombre_completo: alumno.nombre_completo,
-                semestre: alumno.semestre,
-                grupo: alumno.grupo
+                nombre_completo: alumno.nombre_completo
             },
             asistencia
         }
@@ -280,7 +259,7 @@ async function verifyTokenAndCreateAttendance({ token, estado = 'presente', obse
  * Obtiene el historial de asistencias con JOIN a la tabla alumnos
  */
 async function getAttendances(filters = {}) {
-    const { fecha, grupo, numero_control } = filters;
+    const { fecha, numero_control } = filters;
 
     let query = `
         SELECT
@@ -288,8 +267,6 @@ async function getAttendances(filters = {}) {
             a.id_alumno,
             a.numero_control,
             al.nombre_completo,
-            al.semestre,
-            al.grupo,
             DATE_FORMAT(a.fecha, '%Y-%m-%d') AS fecha,
             a.hora,
             a.fecha_hora,
@@ -305,10 +282,6 @@ async function getAttendances(filters = {}) {
     if (fecha) {
         query += ' AND a.fecha = ?';
         params.push(fecha);
-    }
-    if (grupo) {
-        query += ' AND al.grupo = ?';
-        params.push(grupo);
     }
     if (numero_control) {
         query += ' AND a.numero_control = ?';

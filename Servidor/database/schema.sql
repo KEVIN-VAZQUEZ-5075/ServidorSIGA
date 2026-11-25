@@ -1,6 +1,6 @@
 -- ============================================================================
 -- Esquema de Base de Datos: Sistema Inteligente de Gestión de Asistencias (SIGA)
--- Compatible 100% con TiDB Cloud y MySQL
+-- Compatible 100% con TiDB Cloud y MySQL (AUTO_ID_CACHE = 1 para IDs de 1 en 1)
 -- ============================================================================
 
 CREATE DATABASE IF NOT EXISTS siga_db
@@ -11,18 +11,17 @@ USE siga_db;
 
 -- ----------------------------------------------------------------------------
 -- 1. Tabla: alumnos
--- Respeta íntegramente el diseño acordado por el equipo + control de envío QR
+-- El alumno se registra únicamente con numero_control y nombre_completo.
+-- id_alumno se asigna automáticamente de uno en uno (1, 2, 3...).
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS alumnos (
-    id_alumno INT AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador único interno para optimizar las consultas de la base de datos',
+    id_alumno INT AUTO_INCREMENT PRIMARY KEY COMMENT 'Identificador único asignado automáticamente de uno en uno',
     numero_control VARCHAR(10) NOT NULL UNIQUE COMMENT 'Número de control oficial del estudiante utilizado para generar el QR',
     nombre_completo VARCHAR(100) NOT NULL COMMENT 'Nombre y apellidos del estudiante',
-    semestre VARCHAR(20) DEFAULT NULL COMMENT 'Semestre actual cursado por el estudiante (ej. 8vo / Ago-Dic 2026)',
-    grupo VARCHAR(10) DEFAULT NULL COMMENT 'Grupo asignado para la materia (ej. A)',
-    chat_id_telegram VARCHAR(50) DEFAULT NULL COMMENT 'ID numérico que devuelve la API de Telegram al interactuar con el bot',
-    qr_enviado TINYINT(1) NOT NULL DEFAULT 0 COMMENT '0 = Pendiente de generar/enviar QR por app de escritorio, 1 = QR enviado',
+    chat_id_telegram VARCHAR(50) DEFAULT NULL COMMENT 'ID numérico del chat de Telegram (se llena cuando el alumno vincula su cuenta)',
+    qr_enviado TINYINT(1) NOT NULL DEFAULT 0 COMMENT '0 = Pendiente de generar/enviar QR, 1 = QR enviado',
     fecha_registro TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Fecha y hora de alta en el servidor'
-) ENGINE=InnoDB;
+) ENGINE=InnoDB AUTO_ID_CACHE = 1;
 
 -- ----------------------------------------------------------------------------
 -- 2. Tabla: asistencias
@@ -45,4 +44,4 @@ CREATE TABLE IF NOT EXISTS asistencias (
     INDEX idx_asistencias_fecha (fecha),
     INDEX idx_asistencias_alumno_fecha (id_alumno, fecha),
     INDEX idx_asistencias_num_control (numero_control)
-) ENGINE=InnoDB;
+) ENGINE=InnoDB AUTO_ID_CACHE = 1;

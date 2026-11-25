@@ -208,10 +208,10 @@ async function receiveGeneratedQrFromDesktop(req, res) {
             tipo: 'enviar_qr_telegram',
             success: true,
             msg: 'Imagen QR generada por Escritorio. Enviar al alumno por Telegram.',
+            id_alumno: alumno.id_alumno,
             numero_control: alumno.numero_control,
             nombre_completo: alumno.nombre_completo,
-            semestre: alumno.semestre,
-            grupo: alumno.grupo,
+            chat_id: chat_id_telegram,
             chat_id_telegram,
             imagen_qr_base64: cleanQrBase64
         });
