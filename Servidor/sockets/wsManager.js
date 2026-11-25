@@ -18,10 +18,10 @@ let wss = null;
 let currentScanSession = null;
 
 /**
- * Obtiene el chat_id configurado para el Maestro en Telegram (por defecto "7155239838")
+ * Obtiene el chat_id configurado para el Maestro en Telegram (por defecto "123456789")
  */
 function getMaestroChatId() {
-    return String(process.env.ID_MAESTRO || process.env.TELEGRAM_MAESTRO_CHAT_ID || '7155239838').trim();
+    return String(process.env.ID_MAESTRO || process.env.TELEGRAM_MAESTRO_CHAT_ID || '123456789').trim();
 }
 
 /**
@@ -379,9 +379,9 @@ async function handleIncomingWsMessage(ws, rawData, isBinary) {
                 const lista = rows
                     .map(
                         (a) =>
-                            `• ${a.numero_control} - ${a.nombre_completo} (${
+                            `• (ChatID: ${a.chat_id_telegram || 'Sin vincular'}, No. Control: ${a.numero_control}, ${sigaService.formatearApellidosPrimero(a.nombre_completo)}) [${
                                 a.chat_id_telegram ? '🟢 Vinculado' : '🟡 Pendiente'
-                            })`
+                            }]`
                     )
                     .join('\n');
 
@@ -399,10 +399,42 @@ async function handleIncomingWsMessage(ws, rawData, isBinary) {
 
                 const rows = await sigaService.getAttendanceSummaryByStudent();
                 const reporte = rows
-                    .map((r) => `• ${r.nombre_completo} (${r.numero_control}): ${r.total} asistencias`)
+                    .map((r) => `• (ChatID: ${r.chat_id_telegram || 'Sin vincular'}, No. Control: ${r.numero_control}, ${sigaService.formatearApellidosPrimero(r.nombre_completo)}): ${r.total} asistencias`)
                     .join('\n');
 
                 responderATelegram(ws, chatId, `📊 Reporte de asistencias:\n\n${reporte || 'Sin datos.'}`);
+                break;
+            }
+
+            // 1.4 MAESTRO: Eliminar alumno (/borrar <numero_control> o /eliminar <numero_control>)
+            case 'eliminar_alumno':
+            case 'borrar_alumno': {
+                if (ws.modulo === 'desconocido') ws.modulo = 'android';
+
+                if (!esChatDeMaestro(chatId)) {
+                    return responderATelegram(ws, chatId, '⛔ Solo el maestro puede eliminar alumnos.');
+                }
+
+                const numero_control = datos.numero_control || datos.no_control || message.numero_control;
+                const eliminado = await sigaService.deleteStudent(numero_control);
+
+                if (!eliminado) {
+                    responderATelegram(
+                        ws,
+                        chatId,
+                        `❌ No se encontró ningún alumno con el número de control "${numero_control || ''}".`
+                    );
+                } else {
+                    responderATelegram(
+                        ws,
+                        chatId,
+                        `🗑️ Alumno ${sigaService.formatearApellidosPrimero(eliminado.nombre_completo)} (${eliminado.numero_control}) eliminado correctamente del sistema.`
+                    );
+                    broadcastToModules(['web'], {
+                        tipo: 'alumno_eliminado',
+                        numero_control: eliminado.numero_control
+                    });
+                }
                 break;
             }
 
@@ -569,9 +601,10 @@ async function handleIncomingWsMessage(ws, rawData, isBinary) {
                     tipo: 'enviar_qr_telegram',
                     success: true,
                     msg: 'Imagen QR generada por Escritorio. Enviar al alumno por Telegram.',
-                    id_alumno: alumno.id_alumno,
                     numero_control: alumno.numero_control,
                     nombre_completo: alumno.nombre_completo,
+                    semestre: alumno.semestre,
+                    grupo: alumno.grupo,
                     chat_id: chat_id_telegram,
                     chat_id_telegram,
                     imagen_qr_base64: cleanQrBase64
