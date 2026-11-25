@@ -208,10 +208,10 @@ async function receiveGeneratedQrFromDesktop(req, res) {
             tipo: 'enviar_qr_telegram',
             success: true,
             msg: 'Imagen QR generada por Escritorio. Enviar al alumno por Telegram.',
-            id_alumno: alumno.id_alumno,
             numero_control: alumno.numero_control,
             nombre_completo: alumno.nombre_completo,
-            chat_id: chat_id_telegram,
+            semestre: alumno.semestre,
+            grupo: alumno.grupo,
             chat_id_telegram,
             imagen_qr_base64: cleanQrBase64
         });
@@ -237,6 +237,38 @@ async function receiveGeneratedQrFromDesktop(req, res) {
     }
 }
 
+/**
+ * DELETE /api/alumnos/:numero_control
+ */
+async function deleteStudent(req, res) {
+    try {
+        const { numero_control } = req.params;
+        const eliminado = await sigaService.deleteStudent(numero_control);
+        if (!eliminado) {
+            return res.status(404).json({
+                success: false,
+                msg: `Alumno con número de control "${numero_control}" no encontrado.`
+            });
+        }
+        wsManager.broadcastToModules(['web'], {
+            tipo: 'alumno_eliminado',
+            numero_control: eliminado.numero_control
+        });
+        return res.status(200).json({
+            success: true,
+            msg: `Alumno ${eliminado.nombre_completo} (${eliminado.numero_control}) eliminado correctamente.`,
+            alumno: eliminado
+        });
+    } catch (error) {
+        console.error('[studentController.deleteStudent] Error:', error);
+        return res.status(500).json({
+            success: false,
+            msg: 'Error al eliminar el alumno.',
+            error: error.message
+        });
+    }
+}
+
 module.exports = {
     registerStudent,
     getPendingQrStudents,
@@ -244,5 +276,6 @@ module.exports = {
     markQrSent,
     receiveGeneratedQrFromDesktop,
     getAllStudents,
-    getStudentByControlNumber
+    getStudentByControlNumber,
+    deleteStudent
 };
