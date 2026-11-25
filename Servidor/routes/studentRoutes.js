@@ -27,4 +27,7 @@ router.post('/:numero_control/qr-enviado', studentController.markQrSent);
 router.get('/', studentController.getAllStudents);
 router.get('/:numero_control', studentController.getStudentByControlNumber);
 
+// 7. Eliminar alumno
+router.delete('/:numero_control', studentController.deleteStudent);
+
 module.exports = router;
